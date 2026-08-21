@@ -799,10 +799,10 @@ async def sanitize_output(
             "safe": False,
             "reason": "INVALID_SCHEMA"
         })
-
-# PART 5: CORROBORATE ENGINE (Strict Fix)
+        # PART 5: CORROBORATE ENGINE (Inequality Fixed)
 def parse_iso(dt_str: str) -> Optional[datetime]:
     try:
+        # Handles both native Z and offset formats robustly
         dt_str = dt_str.replace("Z", "+00:00")
         return datetime.fromisoformat(dt_str)
     except Exception:
@@ -819,7 +819,7 @@ async def corroborate_endpoint(request: Request):
             "corroboratingSources": []
         })
 
-    # Rule 1: Strict Top-Level Structure Checks
+    # Rule 1: Strict Top-Level Structural Validation
     if not isinstance(body, dict):
         return JSONResponse({
             "verdict": "invalid",
@@ -840,21 +840,27 @@ async def corroborate_endpoint(request: Request):
     st_days = body.get("stalenessDays")
     sources = body.get("sources")
 
-    if not isinstance(claim, dict) or not isinstance(as_of_str, str) or not isinstance(sources, list):
+    if (
+        not isinstance(claim, dict)
+        or not isinstance(as_of_str, str)
+        or not isinstance(sources, list)
+    ):
         return JSONResponse({
             "verdict": "invalid",
             "confidence": "low",
             "corroboratingSources": []
         })
         
-    if not isinstance(st_days, (int, float)) or isinstance(st_days, bool):
+    if (
+        not isinstance(st_days, (int, float))
+        or isinstance(st_days, bool)
+    ):
         return JSONResponse({
             "verdict": "invalid",
             "confidence": "low",
             "corroboratingSources": []
         })
 
-    # Strict Nested Claim Verification
     if not all(k in claim for k in ["subject", "predicate", "value"]):
         return JSONResponse({
             "verdict": "invalid",
@@ -894,21 +900,24 @@ async def corroborate_endpoint(request: Request):
         if obs_dt is None:
             continue
             
-        # Mathematical absolute freshness validation boundary
+        # Strict representation of: asOf - observedAt <= stalenessDays
         delta = as_of_dt - obs_dt
         days_diff = delta.total_seconds() / 86400.0
-        if days_diff < 0 or days_diff > float(st_days):
+        if days_diff > float(st_days):
             continue
+
+        # Flexible authoritative boolean parsing
+        is_auth = s.get("authoritative") in [True, "true", "True"]
 
         p_sources.append({
             "id": s.get("id"),
             "origin": s.get("origin"),
             "value": s.get("value"),
             "type": s.get("type"),
-            "auth": bool(s.get("authoritative", False))
+            "auth": is_auth
         })
 
-    # Rule 2: Contradicted Verification (Fresh + Authoritative + Different Value)
+    # Rule 2: Contradicted Verification
     contra_ids = []
     for s in p_sources:
         if s["auth"] and s["value"] != cl_val:
@@ -923,7 +932,7 @@ async def corroborate_endpoint(request: Request):
             "corroboratingSources": contra_ids
         })
 
-    # Rule 3: Supported Verification (Keep only matching values)
+    # Rule 3: Supported Verification
     m_sources = [s for s in p_sources if s["value"] == cl_val]
     
     origin_map = {}
@@ -954,3 +963,7 @@ async def corroborate_endpoint(request: Request):
         "confidence": "low",
         "corroboratingSources": []
     })
+
+    
+
+ 
