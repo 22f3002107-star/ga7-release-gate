@@ -800,120 +800,99 @@ async def sanitize_output(
             "reason": "INVALID_SCHEMA"
         })
 # PART 5: CORROBORATE ENGINE (Strict Rules)
-def parse_iso(dt_str: str) -> Optional[datetime]:
+from datetime import datetime
+import json
+
+def corroborate_evidence(payload_str):
+    # Rule 1: Validate payload structure
     try:
-        dt_str = dt_str.replace("Z", "+00:00")
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-@app.post("/corroborate")
-async def corroborate_endpoint(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
-
-    if not isinstance(body, dict):
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
+        data = json.loads(payload_str)
+        if not isinstance(data, dict):
+            return {"verdict": "invalid", "confidence": "low", "corroboratingSources": []}
         
-    req_t = ["claim", "asOf", "stalenessDays", "sources"]
-    if not all(k in body for k in req_t):
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
-
-    claim = body.get("claim")
-    as_of_str = body.get("asOf")
-    st_days = body.get("stalenessDays")
-    sources = body.get("sources")
-
-    if not isinstance(claim, dict) or not isinstance(as_of_str, str) or not isinstance(sources, list):
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
+        claim = data.get("claim")
+        as_of_str = data.get("asOf")
+        staleness_days = data.get("stalenessDays")
+        sources = data.get("sources")
         
-    if not isinstance(st_days, (int, float)) or isinstance(st_days, bool):
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
+        if not isinstance(claim, dict) or not isinstance(claim.get("value"), str):
+            return {"verdict": "invalid", "confidence": "low", "corroboratingSources": []}
+        if not isinstance(as_of_str, str) or not isinstance(staleness_days, (int, float)):
+            return {"verdict": "invalid", "confidence": "low", "corroboratingSources": []}
+        if not isinstance(sources, list):
+            return {"verdict": "invalid", "confidence": "low", "corroboratingSources": []}
+            
+        as_of_dt = datetime.fromisoformat(as_of_str.replace("Z", "+00:00"))
+    except Exception:
+        return {"verdict": "invalid", "confidence": "low", "corroboratingSources": []}
 
-    if "value" not in claim or not isinstance(claim.get("value"), str):
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
-
-    cl_val = claim.get("value")
-    as_of_dt = parse_iso(as_of_str)
-    if as_of_dt is None:
-        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
-
-    v_types = {"dns", "ct_log", "registry", "archive", "scan"}
-    p_sources = []
+    target_value = claim["value"]
+    valid_types = {"dns", "ct_log", "registry", "archive", "scan"}
     
+    # Process and filter valid, fresh sources
+    fresh_sources = []
     for s in sources:
         if not isinstance(s, dict):
             continue
-        s_k = ["id", "origin", "value", "observedAt", "type"]
-        if not all(k in s for k in s_k) or not all(isinstance(s.get(k), str) for k in s_k):
+        s_id = s.get("id")
+        origin = s.get("origin")
+        val = s.get("value")
+        obs_at_str = s.get("observedAt")
+        s_type = s.get("type")
+        
+        if not all(isinstance(x, str) for x in [s_id, origin, val, obs_at_str]):
             continue
-        if s.get("type") not in v_types:
+        if s_type not in valid_types:
             continue
             
-        obs_dt = parse_iso(s.get("observedAt"))
-        if obs_dt is None:
-            continue
-            
-        # Exact mathematical delta fractional days bounds
-        delta = as_of_dt - obs_dt
-        days_diff = delta.total_seconds() / 86400.0
-        if days_diff < 0 or days_diff > float(st_days):
+        try:
+            obs_dt = datetime.fromisoformat(obs_at_str.replace("Z", "+00:00"))
+            # Fresh: asOf - observedAt <= stalenessDays (and not in the future relative to asOf)
+            delta_days = (as_of_dt - obs_dt).total_seconds() / 86400.0
+            if 0 <= delta_days <= staleness_days:
+                fresh_sources.append(s)
+        except Exception:
             continue
 
-        p_sources.append({
-            "id": s.get("id"),
-            "origin": s.get("origin"),
-            "value": s.get("value"),
-            "type": s.get("type"),
-            "auth": bool(s.get("authoritative", False))
-        })
-
-    # Rule 2: Contradicted rule criteria verification
-    contra_ids = []
-    for s in p_sources:
-        if s["auth"] and s["value"] != cl_val:
-            contra_ids.append(s["id"])
+    # Rule 2: Contradicted check (At least one fresh authoritative source disagrees)
+    contradicting_ids = []
+    for s in fresh_sources:
+        if s.get("authoritative") is True and s["value"] != target_value:
+            contradicting_ids.append(s["id"])
             
-    if contra_ids:
-        contra_ids = list(set(contra_ids))
-        contra_ids.sort()
-        return JSONResponse({
+    if contradicting_ids:
+        return {
             "verdict": "contradicted",
             "confidence": "low",
-            "corroboratingSources": contra_ids
-        })
+            "corroboratingSources": sorted(list(set(contradicting_ids)))
+        }
 
-    # Rule 3: Supported matching structures
-    m_sources = [s for s in p_sources if s["value"] == cl_val]
+    # Rule 3: Supported check
+    # Keep only fresh sources matching the claim value
+    matching_sources = [s for s in fresh_sources if s["value"] == target_value]
     
+    # Reduce to one representative per origin (lexicographically smallest ID)
     origin_map = {}
-    for s in m_sources:
-        ori = s["origin"]
-        if ori not in origin_map:
-            origin_map[ori] = s
-        else:
-            if s["id"] < origin_map[ori]["id"]:
-                origin_map[ori] = s
-
-    reps = list(origin_map.values())
-
-    if len(reps) >= 2:
-        dist_types = {s["type"] for s in reps}
-        conf = "high" if len(dist_types) >= 2 else "medium"
-        rep_ids = [s["id"] for s in reps]
-        rep_ids.sort()
-        return JSONResponse({
+    for s in matching_sources:
+        origin = s["origin"]
+        if origin not in origin_map or s["id"] < origin_map[origin]["id"]:
+            origin_map[origin] = s
+            
+    representatives = list(origin_map.values())
+    
+    if len(representatives) >= 2:
+        types_present = {s["type"] for s in representatives}
+        confidence = "high" if len(types_present) >= 2 else "medium"
+        rep_ids = sorted([s["id"] for s in representatives])
+        return {
             "verdict": "supported",
-            "confidence": conf,
+            "confidence": confidence,
             "corroboratingSources": rep_ids
-        })
+        }
 
-    # Rule 4: Unverified state
-    return JSONResponse({
-        "verdict": "unverified",
-        "confidence": "low",
-        "corroboratingSources": []
-    })
+    # Rule 4: Unverified fallback
+    return {"verdict": "unverified", "confidence": "low", "corroboratingSources": []}
+
+
+       
 
