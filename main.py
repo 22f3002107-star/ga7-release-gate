@@ -6,10 +6,6 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# =====================================================================
-# ASSIGNMENT 1: CI/CD Container Release Gate (POST /release-gate)
-# =====================================================================
-
 class ActionItem(BaseModel):
     owner: str
     name: str
@@ -44,20 +40,16 @@ def release_gate(payload: ReleaseGateRequest):
     wf = payload.workflow
     img = payload.image
 
-    # 1. Permissions Check
-    expected_perms = {"contents": "read", "packages": "write", "id-token": "none"}
-    if wf.permissions != expected_perms:
+    expected = {"contents": "read", "packages": "write", "id-token": "none"}
+    if wf.permissions != expected:
         violations.append("EXCESS_PERMISSION")
 
-    # 2. PR Trigger Check
     if wf.trigger == "pull_request_target":
         violations.append("UNSAFE_PR_TRIGGER")
 
-    # 3. Tests & Matrix Completion Check
     if not wf.testsPassed or not wf.matrixComplete or wf.failFast:
         violations.append("TESTS_INCOMPLETE")
 
-    # 4. Third-Party Action Pinning Check
     sha_regex = re.compile(r"^[0-9a-f]{40}$")
     for action in wf.actions:
         if action.owner != "actions":
@@ -65,27 +57,17 @@ def release_gate(payload: ReleaseGateRequest):
                 violations.append("MUTABLE_ACTION")
                 break
 
-    # 5. Multi-stage Image Check
     if not img.multiStage:
         violations.append("SINGLE_STAGE_IMAGE")
-
-    # 6. Root Runtime Check
     if img.runsAsRoot:
         violations.append("ROOT_RUNTIME")
-
-    # 7. Secret Leak Check
     if img.secretMode in ["arg", "copy"]:
         violations.append("SECRET_IN_LAYER")
-
-    # 8. Critical Vulnerability Check
     if img.criticalVulnerabilities > 0:
         violations.append("CRITICAL_CVE")
-
-    # 9. Image Digest Pinning Check
     if not img.digestPinned:
         violations.append("UNPINNED_IMAGE")
 
-    # 10 & 11. Production Context Verification
     if payload.target == "production":
         if payload.event != "push" or payload.ref != "refs/heads/main":
             violations.append("INVALID_PRODUCTION_REF")
@@ -94,12 +76,6 @@ def release_gate(payload: ReleaseGateRequest):
 
     decision = "block" if violations else "promote"
     return {"decision": decision, "violations": violations}
-
-
-# =====================================================================
-# ASSIGNMENT 2: LLM Action Firewall (POST /action-firewall)
-# =====================================================================
-
 ASSIGNED_TENANT = "tenant-5jyfvhd"
 ASSIGNED_EMAIL_DOMAIN = "notify-9rd3i5t.example"
 
@@ -116,81 +92,128 @@ def check_html_safety(html_content: str) -> bool:
 @app.post("/action-firewall")
 async def action_firewall(request: Request):
     try:
-        payload = await request.json()
+        p = await request.json()
     except Exception:
         return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
 
-    if not isinstance(payload, dict):
+    if not isinstance(p, dict):
         return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-        
-    required_top = ["provenance", "humanApproved", "action"]
-    if not all(k in payload for k in required_top):
+    if not all(k in p for k in ["provenance", "humanApproved", "action"]):
         return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
 
-    provenance = payload.get("provenance")
-    human_approved = payload.get("humanApproved")
-    action = payload.get("action")
-
-    if provenance not in ["trusted", "untrusted"] or not isinstance(human_approved, bool) or not isinstance(action, dict):
+    prov, appr, act = p.get("provenance"), p.get("humanApproved"), p.get("action")
+    if prov not in ["trusted", "untrusted"] or not isinstance(appr, bool) or not isinstance(act, dict):
         return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
 
-    if "tool" not in action or "args" not in action:
+    if "tool" not in act or "args" not in act:
         return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
 
-    tool_name = action.get("tool")
-    args = action.get("args")
-
-    if not isinstance(tool_name, str) or not isinstance(args, dict):
+    t_name, args = act.get("tool"), act.get("args")
+    if not isinstance(t_name, str) or not isinstance(args, dict):
         return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
 
-    allowed_tools = ["search", "lookup_record", "send_email", "render_html"]
-    if tool_name not in allowed_tools:
+    if t_name not in ["search", "lookup_record", "send_email", "render_html"]:
         return JSONResponse({"decision": "block", "reason": "TOOL_NOT_ALLOWED"})
 
-    if tool_name == "search":
+    if t_name == "search":
         if list(args.keys()) != ["query"]:
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-        query = args.get("query")
-        if not isinstance(query, str) or len(query) < 1 or len(query) > 200:
+        q = args.get("query")
+        if not isinstance(q, str) or len(q) < 1 or len(q) > 200:
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
 
-    elif tool_name == "lookup_record":
+    elif t_name == "lookup_record":
         if set(args.keys()) != {"tenantId", "recordId"}:
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-        tenant_id = args.get("tenantId")
-        record_id = args.get("recordId")
-        if not isinstance(tenant_id, str) or not isinstance(record_id, str) or record_id == "":
+        tid, rid = args.get("tenantId"), args.get("recordId")
+        if not isinstance(tid, str) or not isinstance(rid, str) or rid == "":
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-        
-        if tenant_id != ASSIGNED_TENANT:
+        if tid != ASSIGNED_TENANT:
             return JSONResponse({"decision": "block", "reason": "TENANT_SCOPE"})
 
-    elif tool_name == "send_email":
+    elif t_name == "send_email":
         if set(args.keys()) != {"to", "subject", "body"}:
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-        to_email = args.get("to")
-        subject = args.get("subject")
-        body = args.get("body")
-        if not isinstance(to_email, str) or not isinstance(subject, str) or not isinstance(body, str):
+        to_em = args.get("to")
+        if not all(isinstance(args.get(k), str) for k in ["to", "subject", "body"]):
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-
-        if "@" not in to_email:
+        if "@" not in to_em or to_em.split("@")[-1].strip() != ASSIGNED_EMAIL_DOMAIN:
             return JSONResponse({"decision": "block", "reason": "EGRESS_DENIED"})
-        domain = to_email.split("@")[-1].strip()
-        if domain != ASSIGNED_EMAIL_DOMAIN:
-            return JSONResponse({"decision": "block", "reason": "EGRESS_DENIED"})
-
-        if not human_approved:
+        if not appr:
             return JSONResponse({"decision": "block", "reason": "APPROVAL_REQUIRED"})
 
-    elif tool_name == "render_html":
-        if list(args.keys()) != ["html"]:
+    elif t_name == "render_html":
+        if list(args.keys()) != ["html"] or not isinstance(args.get("html"), str):
             return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-        html_str = args.get("html")
-        if not isinstance(html_str, str):
-            return JSONResponse({"decision": "block", "reason": "INVALID_SCHEMA"})
-
-        if not check_html_safety(html_str):
+        if not check_html_safety(args.get("html")):
             return JSONResponse({"decision": "block", "reason": "UNSAFE_OUTPUT"})
 
     return JSONResponse({"decision": "allow", "reason": "ALLOW"})
+ASSIGNED_ENV = "prod-ftxjgi"
+REQ_LABELS = {"owner": "student-v7dyr", "environment": "production", "cost_center": "cc-o9sl"}
+
+@app.post("/terraform/plan")
+async def terraform_plan(request: Request):
+    try:
+        p = await request.json()
+    except Exception:
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    if not isinstance(p, dict):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+    req_k = ["environment", "state", "providerVersion", "destroyApproved", "resource"]
+    if not all(k in p for k in req_k):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    env, state, pv, d_appr, res = p.get("environment"), p.get("state"), p.get("providerVersion"), p.get("destroyApproved"), p.get("resource")
+    if not isinstance(env, str) or not isinstance(state, dict) or not isinstance(pv, str) or not isinstance(d_appr, bool) or not isinstance(res, dict):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    if "backend" not in state or "locked" not in state:
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+    bnd, lck = state.get("backend"), state.get("locked")
+    if not isinstance(bnd, str) or not isinstance(lck, bool):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    res_k = ["address", "type", "action", "labels", "secret", "forceDestroy"]
+    if not all(k in res for k in res_k):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    addr, r_type, act, lbs, sec, fd = res.get("address"), res.get("type"), res.get("action"), res.get("labels"), res.get("secret"), res.get("forceDestroy")
+    if not isinstance(addr, str) or not isinstance(r_type, str) or not isinstance(act, str) or not isinstance(lbs, dict) or not isinstance(fd, bool):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    if sec is not None and not isinstance(sec, str):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    if env != ASSIGNED_ENV:
+        return JSONResponse({"decision": "reject", "reason": "ENVIRONMENT_MISMATCH"})
+
+    if bnd not in ["gcs", "s3", "azurerm", "remote"] or lck is not True:
+        return JSONResponse({"decision": "reject", "reason": "STATE_UNSAFE"})
+
+    pv_s = pv.strip()
+    pinned = False
+    if re.match(r"^(=)?\s*\d+\.\d+\.\d+$", pv_s):
+        pinned = True
+    elif re.match(r"^~\>\s*\d+\.\d+(\.\d+)?$", pv_s):
+        pinned = True
+    if not pinned or any(x in pv_s for x in [">=", "*", "latest"]):
+        return JSONResponse({"decision": "reject", "reason": "UNPINNED_PROVIDER"})
+
+    for k, v in REQ_LABELS.items():
+        if lbs.get(k) != v:
+            return JSONResponse({"decision": "reject", "reason": "MISSING_LABELS"})
+
+    if sec is not None:
+        if not sec.startswith("secret://") or len(sec) <= len("secret://"):
+            return JSONResponse({"decision": "reject", "reason": "PLAINTEXT_SECRET"})
+
+    if act == "delete" and r_type in ["storage_bucket", "sql_database", "persistent_disk"]:
+        if not d_appr:
+            return JSONResponse({"decision": "reject", "reason": "DELETE_NOT_APPROVED"})
+
+    if r_type == "storage_bucket" and fd is True:
+        return JSONResponse({"decision": "reject", "reason": "FORCE_DESTROY"})
+
+    return JSONResponse({"decision": "approve", "reason": "APPROVE"})
