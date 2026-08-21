@@ -6,6 +6,9 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
+# ==========================================
+# PART 1: CI/CD Container Release Gate
+# ==========================================
 class ActionItem(BaseModel):
     owner: str
     name: str
@@ -76,6 +79,10 @@ def release_gate(payload: ReleaseGateRequest):
 
     decision = "block" if violations else "promote"
     return {"decision": decision, "violations": violations}
+
+# ==========================================
+# PART 2: LLM Action Firewall
+# ==========================================
 ASSIGNED_TENANT = "tenant-5jyfvhd"
 ASSIGNED_EMAIL_DOMAIN = "notify-9rd3i5t.example"
 
@@ -149,6 +156,10 @@ async def action_firewall(request: Request):
             return JSONResponse({"decision": "block", "reason": "UNSAFE_OUTPUT"})
 
     return JSONResponse({"decision": "allow", "reason": "ALLOW"})
+
+# ==========================================
+# PART 3: Terraform Plan Policy Gate
+# ==========================================
 ASSIGNED_ENV = "prod-ftxjgi"
 REQ_LABELS = {"owner": "student-v7dyr", "environment": "production", "cost_center": "cc-o9sl"}
 
@@ -181,6 +192,10 @@ async def terraform_plan(request: Request):
 
     addr, r_type, act, lbs, sec, fd = res.get("address"), res.get("type"), res.get("action"), res.get("labels"), res.get("secret"), res.get("forceDestroy")
     if not isinstance(addr, str) or not isinstance(r_type, str) or not isinstance(act, str) or not isinstance(lbs, dict) or not isinstance(fd, bool):
+        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
+
+    # Strict labels internal type validation (String keys & values check)
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in lbs.items()):
         return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
 
     if sec is not None and not isinstance(sec, str):
