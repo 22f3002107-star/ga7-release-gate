@@ -586,6 +586,7 @@ def evaluate_rules(
         if channel in [
             "html", "markdown", "url"
         ]:
+            # Strict validation handling for optional whitespace injection before colons
             if re.search(
                 r'(javascript|data'
                 r'|vbscript)\s*:',
@@ -799,6 +800,3 @@ async def sanitize_output(
             "reason": "INVALID_SCHEMA"
         })
 
-
-
-    
