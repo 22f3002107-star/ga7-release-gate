@@ -1,0 +1,17 @@
+name: TDS GA7 Release Gate
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: TDS identity: 22f3002107@ds.study.iitm.ac.in
+        run: |
+          echo "Identity marked successfully for 22f3002107@ds.study.iitm.ac.in"
