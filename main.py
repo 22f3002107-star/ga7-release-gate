@@ -799,12 +799,14 @@ async def sanitize_output(
             "safe": False,
             "reason": "INVALID_SCHEMA"
         })
-        # PART 5: CORROBORATE ENGINE (Inequality Fixed)
+# PART 5: CORROBORATE ENGINE (Inequality Fixed)    
 def parse_iso(dt_str: str) -> Optional[datetime]:
+    if not isinstance(dt_str, str):
+        return None
     try:
-        # Handles both native Z and offset formats robustly
-        dt_str = dt_str.replace("Z", "+00:00")
-        return datetime.fromisoformat(dt_str)
+        # 'Z' ko UTC offset se replace karein aur spaces ko handle karein
+        normalized = dt_str.replace("Z", "+00:00").replace(" ", "T")
+        return datetime.fromisoformat(normalized)
     except Exception:
         return None
 
@@ -813,77 +815,37 @@ async def corroborate_endpoint(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
 
-    # Rule 1: Strict Top-Level Structural Validation
+    # --- RULE 1: STRICT INVALID CHECKS (Exactly as per definition) ---
     if not isinstance(body, dict):
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
         
-    req_t = ["claim", "asOf", "stalenessDays", "sources"]
-    if not all(k in body for k in req_t):
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+    if "asOf" not in body or "stalenessDays" not in body or "sources" not in body or "claim" not in body:
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
 
     claim = body.get("claim")
     as_of_str = body.get("asOf")
     st_days = body.get("stalenessDays")
     sources = body.get("sources")
 
-    if (
-        not isinstance(claim, dict)
-        or not isinstance(as_of_str, str)
-        or not isinstance(sources, list)
-    ):
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+    # Type validation according to strict guidelines
+    if not isinstance(claim, dict) or not isinstance(sources, list):
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
         
-    if (
-        not isinstance(st_days, (int, float))
-        or isinstance(st_days, bool)
-    ):
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+    if not isinstance(st_days, (int, float)) or isinstance(st_days, bool):
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
 
-    if not all(k in claim for k in ["subject", "predicate", "value"]):
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
-        
-    if not all(isinstance(claim.get(k), str) for k in ["subject", "predicate", "value"]):
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+    # FIX: Sirf claim["value"] ka string hona check karna hai (subject/predicate mandatory nahi hain)
+    if "value" not in claim or not isinstance(claim.get("value"), str):
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
 
     cl_val = claim.get("value")
     as_of_dt = parse_iso(as_of_str)
     if as_of_dt is None:
-        return JSONResponse({
-            "verdict": "invalid",
-            "confidence": "low",
-            "corroboratingSources": []
-        })
+        return JSONResponse({"verdict": "invalid", "confidence": "low", "corroboratingSources": []})
 
+    # --- SOURCE FILTERING ---
     v_types = {"dns", "ct_log", "registry", "archive", "scan"}
     p_sources = []
     
@@ -900,14 +862,13 @@ async def corroborate_endpoint(request: Request):
         if obs_dt is None:
             continue
             
-        # Strict representation of: asOf - observedAt <= stalenessDays
+        # Freshness Check: asOf - observedAt <= stalenessDays
         delta = as_of_dt - obs_dt
         days_diff = delta.total_seconds() / 86400.0
         if days_diff > float(st_days):
             continue
 
-        # Flexible authoritative boolean parsing
-        is_auth = s.get("authoritative") in [True, "true", "True"]
+        is_auth = s.get("authoritative") is True
 
         p_sources.append({
             "id": s.get("id"),
@@ -917,52 +878,49 @@ async def corroborate_endpoint(request: Request):
             "auth": is_auth
         })
 
-    # Rule 2: Contradicted Verification
+    # --- RULE 2: CONTRADICTED CHECK ---
     contra_ids = []
     for s in p_sources:
         if s["auth"] and s["value"] != cl_val:
             contra_ids.append(s["id"])
             
     if contra_ids:
-        contra_ids = list(set(contra_ids))
-        contra_ids.sort()
         return JSONResponse({
             "verdict": "contradicted",
             "confidence": "low",
-            "corroboratingSources": contra_ids
+            "corroboratingSources": sorted(list(set(contra_ids)))
         })
 
-    # Rule 3: Supported Verification
+    # --- RULE 3: SUPPORTED CHECK ---
     m_sources = [s for s in p_sources if s["value"] == cl_val]
     
     origin_map = {}
     for s in m_sources:
         ori = s["origin"]
-        if ori not in origin_map:
+        if ori not in origin_map or s["id"] < origin_map[ori]["id"]:
             origin_map[ori] = s
-        else:
-            if s["id"] < origin_map[ori]["id"]:
-                origin_map[ori] = s
 
     reps = list(origin_map.values())
 
     if len(reps) >= 2:
         dist_types = {s["type"] for s in reps}
         conf = "high" if len(dist_types) >= 2 else "medium"
-        rep_ids = [s["id"] for s in reps]
-        rep_ids.sort()
         return JSONResponse({
             "verdict": "supported",
             "confidence": conf,
-            "corroboratingSources": rep_ids
+            "corroboratingSources": sorted([s["id"] for s in reps])
         })
 
-    # Rule 4: Unverified Fallback State Controls
+    # --- RULE 4: UNVERIFIED FALLBACK ---
     return JSONResponse({
         "verdict": "unverified",
         "confidence": "low",
         "corroboratingSources": []
     })
+
+    
+
+       
 
     
 
