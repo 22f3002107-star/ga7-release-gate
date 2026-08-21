@@ -1,6 +1,6 @@
 import re
-from typing import List, Literal, Optional
-from pydantic import BaseModel
+from typing import List, Literal, Optional, Dict, Any
+from pydantic import BaseModel, ValidationError
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -158,56 +158,53 @@ async def action_firewall(request: Request):
     return JSONResponse({"decision": "allow", "reason": "ALLOW"})
 
 # ==========================================
-# PART 3: Terraform Plan Policy Gate
+# PART 3: Terraform Plan Policy Gate (Strict)
 # ==========================================
 ASSIGNED_ENV = "prod-ftxjgi"
 REQ_LABELS = {"owner": "student-v7dyr", "environment": "production", "cost_center": "cc-o9sl"}
 
+class TFStateModel(BaseModel):
+    backend: str
+    locked: bool
+
+class TFResourceModel(BaseModel):
+    address: str
+    type: str
+    action: str
+    labels: Dict[str, Any]
+    secret: Optional[str]
+    forceDestroy: bool
+
+class TFPlanRequest(BaseModel):
+    environment: str
+    state: TFStateModel
+    providerVersion: str
+    destroyApproved: bool
+    resource: TFResourceModel
+
 @app.post("/terraform/plan")
 async def terraform_plan(request: Request):
     try:
-        p = await request.json()
+        raw_body = await request.json()
+        p = TFPlanRequest(**raw_body)
     except Exception:
         return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
 
-    if not isinstance(p, dict):
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-    req_k = ["environment", "state", "providerVersion", "destroyApproved", "resource"]
-    if not all(k in p for k in req_k):
+    # Check allowed action types from rule 1 enum definition
+    if p.resource.action not in ["create", "update", "delete"]:
         return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
 
-    env, state, pv, d_appr, res = p.get("environment"), p.get("state"), p.get("providerVersion"), p.get("destroyApproved"), p.get("resource")
-    if not isinstance(env, str) or not isinstance(state, dict) or not isinstance(pv, str) or not isinstance(d_appr, bool) or not isinstance(res, dict):
+    # Ensure label values are strictly primitive string format
+    if not all(isinstance(v, str) for v in p.resource.labels.values()):
         return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
 
-    if "backend" not in state or "locked" not in state:
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-    bnd, lck = state.get("backend"), state.get("locked")
-    if not isinstance(bnd, str) or not isinstance(lck, bool):
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-
-    res_k = ["address", "type", "action", "labels", "secret", "forceDestroy"]
-    if not all(k in res for k in res_k):
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-
-    addr, r_type, act, lbs, sec, fd = res.get("address"), res.get("type"), res.get("action"), res.get("labels"), res.get("secret"), res.get("forceDestroy")
-    if not isinstance(addr, str) or not isinstance(r_type, str) or not isinstance(act, str) or not isinstance(lbs, dict) or not isinstance(fd, bool):
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-
-    # Strict labels internal type validation (String keys & values check)
-    if not all(isinstance(k, str) and isinstance(v, str) for k, v in lbs.items()):
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-
-    if sec is not None and not isinstance(sec, str):
-        return JSONResponse({"decision": "reject", "reason": "INVALID_PLAN"})
-
-    if env != ASSIGNED_ENV:
+    if p.environment != ASSIGNED_ENV:
         return JSONResponse({"decision": "reject", "reason": "ENVIRONMENT_MISMATCH"})
 
-    if bnd not in ["gcs", "s3", "azurerm", "remote"] or lck is not True:
+    if p.state.backend not in ["gcs", "s3", "azurerm", "remote"] or p.state.locked is not True:
         return JSONResponse({"decision": "reject", "reason": "STATE_UNSAFE"})
 
-    pv_s = pv.strip()
+    pv_s = p.providerVersion.strip()
     pinned = False
     if re.match(r"^(=)?\s*\d+\.\d+\.\d+$", pv_s):
         pinned = True
@@ -217,18 +214,18 @@ async def terraform_plan(request: Request):
         return JSONResponse({"decision": "reject", "reason": "UNPINNED_PROVIDER"})
 
     for k, v in REQ_LABELS.items():
-        if lbs.get(k) != v:
+        if p.resource.labels.get(k) != v:
             return JSONResponse({"decision": "reject", "reason": "MISSING_LABELS"})
 
-    if sec is not None:
-        if not sec.startswith("secret://") or len(sec) <= len("secret://"):
+    if p.resource.secret is not None:
+        if not p.resource.secret.startswith("secret://") or len(p.resource.secret) <= len("secret://"):
             return JSONResponse({"decision": "reject", "reason": "PLAINTEXT_SECRET"})
 
-    if act == "delete" and r_type in ["storage_bucket", "sql_database", "persistent_disk"]:
-        if not d_appr:
+    if p.resource.action == "delete" and p.resource.type in ["storage_bucket", "sql_database", "persistent_disk"]:
+        if not p.destroyApproved:
             return JSONResponse({"decision": "reject", "reason": "DELETE_NOT_APPROVED"})
 
-    if r_type == "storage_bucket" and fd is True:
+    if p.resource.type == "storage_bucket" and p.resource.forceDestroy is True:
         return JSONResponse({"decision": "reject", "reason": "FORCE_DESTROY"})
 
     return JSONResponse({"decision": "approve", "reason": "APPROVE"})
