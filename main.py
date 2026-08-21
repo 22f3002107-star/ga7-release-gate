@@ -186,24 +186,27 @@ async def terraform_plan(request: Request):
         return JSONResponse({"decision": "reject", "reason": "FORCE_DESTROY"})
     return JSONResponse({"decision": "approve", "reason": "APPROVE"})
 
-# PART 4: SANITIZE OUTPUT (Asst 4)
+# PART 4: SANITIZE OUTPUT (Strict)
 ALLOWED_HOSTS = [
     "cdn-3u2rvuu.example",
     "app-x8k3oyw.example"
 ]
 
 def single_decode(text: str) -> str:
-    text = unquote(text)
-    text = html.unescape(text)
-    def replace_unicode(match):
-        return chr(
-            int(match.group(1), 16)
+    try:
+        text = unquote(text)
+        text = html.unescape(text)
+        def replace_unicode(match):
+            return chr(
+                int(match.group(1), 16)
+            )
+        text = re.sub(
+            r'\\u([0-9a-fA-F]{4})',
+            replace_unicode,
+            text
         )
-    text = re.sub(
-        r'\\u([0-9a-fA-F]{4})',
-        replace_unicode,
-        text
-    )
+    except Exception:
+        pass
     return text
 
 def extract_urls(
@@ -211,240 +214,253 @@ def extract_urls(
     text: str
 ) -> List[str]:
     urls = []
-    if channel == "html":
-        found = re.findall(
-            r'(?:src|href)\s*=\s*'
-            r'["\']([^"\']+)["\']',
-            text,
-            re.IGNORECASE
-        )
-        urls.extend(found)
-    elif channel == "markdown":
-        found = re.findall(
-            r'\]\(([^)]+)\)',
-            text
-        )
-        urls.extend(found)
-    elif channel == "url":
-        urls.append(text.strip())
+    try:
+        if channel == "html":
+            found = re.findall(
+                r'(?:src|href)\s*=\s*'
+                r'["\']([^"\']+)["\']',
+                text,
+                re.IGNORECASE
+            )
+            urls.extend(found)
+        elif channel == "markdown":
+            found = re.findall(
+                r'\]\(([^)]+)\)',
+                text
+            )
+            urls.extend(found)
+        elif channel == "url":
+            urls.append(text.strip())
+    except Exception:
+        pass
     return urls
 
 def evaluate_rules(
     channel: str,
     output: str
 ) -> Optional[str]:
-    if channel == "html":
-        if re.search(
-            r'<\s*(script|iframe'
-            r'|object|embed)\b',
-            output,
-            re.IGNORECASE
-        ):
-            return "SCRIPT_TAG"
-        if re.search(
-            r'\bon[a-zA-Z]+\s*=',
-            output
-        ):
-            return "EVENT_HANDLER"
-
-    if channel in [
-        "html",
-        "markdown",
-        "url"
-    ]:
-        if re.search(
-            r'(javascript|data'
-            r'|vbscript)\s*:',
-            output,
-            re.IGNORECASE
-        ):
-            return "DANGEROUS_SCHEME"
-        
-        extracted_urls = (
-            extract_urls(
-                channel,
-                output
-            )
-        )
-        for u in extracted_urls:
-            u_clean = u.strip()
-            if u_clean.startswith("//"):
-                u_clean = (
-                    "https:" + u_clean
-                )
-            if re.match(
-                r'^[a-zA-Z]'
-                r'[a-zA-Z0-9+.-]*://',
-                u_clean
+    try:
+        if channel == "html":
+            if re.search(
+                r'<\s*(script|iframe'
+                r'|object|embed)\b',
+                output,
+                re.IGNORECASE
             ):
-                try:
-                    parsed = urlparse(
-                        u_clean
+                return "SCRIPT_TAG"
+            if re.search(
+                r'\bon[a-zA-Z]+\s*=',
+                output
+            ):
+                return "EVENT_HANDLER"
+
+        if channel in [
+            "html",
+            "markdown",
+            "url"
+        ]:
+            if re.search(
+                r'(javascript|data'
+                r'|vbscript)\s*:',
+                output,
+                re.IGNORECASE
+            ):
+                return "DANGEROUS_SCHEME"
+            
+            extracted_urls = (
+                extract_urls(
+                    channel,
+                    output
+                )
+            )
+            for u in extracted_urls:
+                u_clean = u.strip()
+                if u_clean.startswith("//"):
+                    u_clean = (
+                        "https:" + u_clean
                     )
-                    if (
-                        parsed.scheme
-                        .lower()
-                        not in [
-                            "http",
-                            "https"
-                        ]
-                    ):
+                if re.match(
+                    r'^[a-zA-Z]'
+                    r'[a-zA-Z0-9+.-]*://',
+                    u_clean
+                ):
+                    try:
+                        parsed = urlparse(
+                            u_clean
+                        )
+                        if (
+                            parsed.scheme
+                            .lower()
+                            not in [
+                                "http",
+                                "https"
+                            ]
+                        ):
+                            return (
+                                "DANGEROUS_SCHEME"
+                            )
+                    except Exception:
                         return (
                             "DANGEROUS_SCHEME"
                         )
-                except Exception:
-                    return (
-                        "DANGEROUS_SCHEME"
-                    )
 
-    if channel in [
-        "html",
-        "markdown",
-        "url"
-    ]:
-        extracted_urls = (
-            extract_urls(
-                channel,
-                output
-            )
-        )
-        for u in extracted_urls:
-            u_clean = u.strip()
-            if u_clean.startswith("//"):
-                u_clean = (
-                    "https:" + u_clean
+        if channel in [
+            "html",
+            "markdown",
+            "url"
+        ]:
+            extracted_urls = (
+                extract_urls(
+                    channel,
+                    output
                 )
-            if re.match(
-                r'^[a-zA-Z]'
-                r'[a-zA-Z0-9+.-]*://',
-                u_clean
-            ):
-                try:
-                    parsed = urlparse(
-                        u_clean
+            )
+            for u in extracted_urls:
+                u_clean = u.strip()
+                if u_clean.startswith("//"):
+                    u_clean = (
+                        "https:" + u_clean
                     )
-                    hostname = (
-                        parsed.hostname
-                    )
-                    if hostname:
-                        hostname = (
-                            hostname
-                            .lower()
+                if re.match(
+                    r'^[a-zA-Z]'
+                    r'[a-zA-Z0-9+.-]*://',
+                    u_clean
+                ):
+                    try:
+                        parsed = urlparse(
+                            u_clean
                         )
-                        if (
-                            hostname
-                            not in
-                            ALLOWED_HOSTS
-                        ):
+                        hostname = (
+                            parsed.hostname
+                        )
+                        if hostname:
+                            hostname = (
+                                hostname
+                                .lower()
+                            )
+                            if (
+                                hostname
+                                not in
+                                ALLOWED_HOSTS
+                            ):
+                                return (
+                                    "EXTERNAL_EXFIL"
+                                )
+                        else:
                             return (
                                 "EXTERNAL_EXFIL"
                             )
-                    else:
+                    except Exception:
                         return (
                             "EXTERNAL_EXFIL"
                         )
-                except Exception:
-                    return (
-                        "EXTERNAL_EXFIL"
-                    )
 
-    if channel == "sql":
-        lower_out = output.lower()
-        sql_triggers = [
-            "'", '"', ";", "--",
-            "/*", "union", "or 1=1"
-        ]
-        if any(
-            t in lower_out
-            for t in sql_triggers
-        ):
-            return "SQL_METACHAR"
+        if channel == "sql":
+            lower_out = output.lower()
+            sql_triggers = [
+                "'", '"', ";", "--",
+                "/*", "union", "or 1=1"
+            ]
+            if any(
+                t in lower_out
+                for t in sql_triggers
+            ):
+                return "SQL_METACHAR"
 
-    if channel == "shell":
-        shell_triggers = [
-            ";", "&", "|", "`",
-            "<", ">", "$(", "${"
-        ]
-        if any(
-            t in output
-            for t in shell_triggers
-        ):
-            return "SHELL_METACHAR"
+        if channel == "shell":
+            shell_triggers = [
+                ";", "&", "|", "`",
+                "<", ">", "$(", "${"
+            ]
+            if any(
+                t in output
+                for t in shell_triggers
+            ):
+                return "SHELL_METACHAR"
+    except Exception:
+        return "INVALID_SCHEMA"
     return None
 
 @app.post("/sanitize-output")
 async def sanitize_output(
     request: Request
 ):
+    # Pure logic ko global crash protection diya gaya hai
     try:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({
+                "safe": False,
+                "reason": "INVALID_SCHEMA"
+            })
+
+        if (
+            not isinstance(body, dict)
+            or "channel" not in body
+            or "output" not in body
+        ):
+            return JSONResponse({
+                "safe": False,
+                "reason": "INVALID_SCHEMA"
+            })
+            
+        channel = body.get("channel")
+        output = body.get("output")
+        
+        if channel not in [
+            "html", "markdown", "url",
+            "sql", "shell"
+        ]:
+            return JSONResponse({
+                "safe": False,
+                "reason": "INVALID_SCHEMA"
+            })
+        if (
+            not isinstance(output, str)
+            or len(output) > 20000
+        ):
+            return JSONResponse({
+                "safe": False,
+                "reason": "INVALID_SCHEMA"
+            })
+
+        decoded_output = (
+            single_decode(output)
+        )
+        if decoded_output != output:
+            tripped = (
+                evaluate_rules(
+                    channel,
+                    decoded_output
+                )
+            )
+            if tripped is not None:
+                return JSONResponse({
+                    "safe": False,
+                    "reason": (
+                        "ENCODED_PAYLOAD"
+                    )
+                })
+
+        tripped = (
+            evaluate_rules(
+                channel,
+                output
+            )
+        )
+        if tripped is not None:
+            return JSONResponse({
+                "safe": False,
+                "reason": tripped
+            })
+
+        return JSONResponse({
+            "safe": True,
+            "reason": "SAFE"
+        })
     except Exception:
         return JSONResponse({
             "safe": False,
             "reason": "INVALID_SCHEMA"
         })
-
-    if (
-        not isinstance(body, dict)
-        or "channel" not in body
-        or "output" not in body
-    ):
-        return JSONResponse({
-            "safe": False,
-            "reason": "INVALID_SCHEMA"
-        })
-        
-    channel = body.get("channel")
-    output = body.get("output")
-    
-    if channel not in [
-        "html", "markdown", "url",
-        "sql", "shell"
-    ]:
-        return JSONResponse({
-            "safe": False,
-            "reason": "INVALID_SCHEMA"
-        })
-    if (
-        not isinstance(output, str)
-        or len(output) > 20000
-    ):
-        return JSONResponse({
-            "safe": False,
-            "reason": "INVALID_SCHEMA"
-        })
-
-    decoded_output = (
-        single_decode(output)
-    )
-    if decoded_output != output:
-        tripped_reason = (
-            evaluate_rules(
-                channel,
-                decoded_output
-            )
-        )
-        if tripped_reason is not None:
-            return JSONResponse({
-                "safe": False,
-                "reason": (
-                    "ENCODED_PAYLOAD"
-                )
-            })
-
-    tripped_reason = (
-        evaluate_rules(
-            channel,
-            output
-        )
-    )
-    if tripped_reason is not None:
-        return JSONResponse({
-            "safe": False,
-            "reason": tripped_reason
-        })
-    return JSONResponse({
-        "safe": True,
-        "reason": "SAFE"
-    })
-
