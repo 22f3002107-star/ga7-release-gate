@@ -186,7 +186,7 @@ async def terraform_plan(request: Request):
         return JSONResponse({"decision": "reject", "reason": "FORCE_DESTROY"})
     return JSONResponse({"decision": "approve", "reason": "APPROVE"})
 
-# PART 4: SANITIZE OUTPUT (Strict)
+   # PART 4: SANITIZE OUTPUT (Path Fixed)
 ALLOWED_HOSTS = [
     "cdn-3u2rvuu.example",
     "app-x8k3oyw.example"
@@ -381,11 +381,11 @@ def evaluate_rules(
         return "INVALID_SCHEMA"
     return None
 
+# EXACT ASSIGNED ENDPOINT MATCHER
 @app.post("/sanitize-output")
 async def sanitize_output(
     request: Request
 ):
-    # Pure logic ko global crash protection diya gaya hai
     try:
         try:
             body = await request.json()
@@ -464,3 +464,8 @@ async def sanitize_output(
             "safe": False,
             "reason": "INVALID_SCHEMA"
         })
+ 
+
+
+           
+        
